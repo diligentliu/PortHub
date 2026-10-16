@@ -1,0 +1,12 @@
+{
+  "port": 15801,
+  "host": "127.0.0.1",
+  "providers": {
+    "workbuddy": {
+      "enabled": true
+    },
+    "echo": {
+      "enabled": false
+    }
+  }
+}
