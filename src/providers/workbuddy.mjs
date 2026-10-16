@@ -104,8 +104,10 @@ const VARIANTS = [
 /**
  * 登录 domain 属于哪个区域。
  *
- * 以 `workbuddy.ai` 结尾是国际版，其余（含空）都是国内版 —— 国内版登录后
- * 写的是 `www.workbuddy.cn`，空 domain 在实测中只出现在国内账号上。
+ * 以 `workbuddy.ai` 结尾是国际版，其余（含空）都算国内版：国内版登录后写
+ * 的是 `www.workbuddy.cn`，而空 domain 没有任何区域声明，归到国内版是既定
+ * 约定。注意这个函数只回答「属于哪边」，空 domain 该不该**拒绝**是另一个
+ * 问题，由 assertSameRegion 单独判断。
  */
 function regionOf (domain) {
   const lowered = String(domain ?? '').trim().toLowerCase()
@@ -119,6 +121,28 @@ function regionLabel (region) {
 }
 
 const DEFAULT_SYSTEM = 'You are a helpful assistant.'
+
+/**
+ * 国内版目录请求的 User-Agent。
+ *
+ * 上游按 UA 切分 roster：CLI 形态才返回 `cli` agent（可 chat 的模型集），
+ * App 形态返回的是 App 内部 roster（含大量不可 chat 的条目）。
+ * 版本号与 chat 无关，仅作形态标识 —— 网关不据此判断模型能力。
+ */
+const CN_CATALOG_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
+
+/**
+ * cli roster 缺失时的启发式过滤。
+ *
+ * 目录里明确不可 chat 的条目带有能力标记（如 CodeCompletion），
+ * 这些没有 chat 语义。宁可少列几个，也不要把注定失败的模型给用户。
+ */
+function looksChatCapable (row) {
+  const id = String(row.id ?? '')
+  if (id === '') return false
+  // 这些后缀/前缀的条目是补全、提交信息等非对话能力
+  return !/completion|commit|inline|autocomplete|tabnine/i.test(id)
+}
 
 /** 凭据快到期前多久开始刷新。 */
 const REFRESH_MARGIN_MS = 5 * 60_000
@@ -452,8 +476,10 @@ function createVariantProvider (variant, { appBundle, authFile }) {
       ...typeof data.expiresIn === 'number' && data.expiresIn > 0
         ? { expiresAt: Date.now() + data.expiresIn * 1000 }
         : {},
-      // 上游可能在刷新时换 domain。只更新身份段用的值，不据此改端点。
-      ...typeof data.domain === 'string' && data.domain ? { domain: data.domain } : {},
+      // 刻意不采纳响应里的 domain：端点由变体决定、与 domain 无关，而
+      // domain 是区域校验的依据 —— 让一个网络响应去改写它，等于给
+      // assertSameRegion 开了一条绕过路径。真要换了区域，App 自己会把新
+      // domain 写进凭据文件，下次按 mtime 重读即可。
     }
   }
 
@@ -522,8 +548,8 @@ function createVariantProvider (variant, { appBundle, authFile }) {
    * 官方客户端的 User-Agent（三段式，来自 app.asar 的 Jr()）：
    *   `WorkBuddy/${v}` + `${产品名}/${v}` + 有 CLI 版本时再拼 ` CLI/${cli}`
    *
-   * 版本号取自本变体自己的 App bundle，所以两个上游各自报自己安装的版本，
-   * 不会互相冒充（国内版 5.8.3 / 国际版 5.7.6 是两台机器上的真实值）。
+   * 版本号取自本变体自己的 App bundle：两个 App 的版本并不一致（本机实测
+   * 国内版 5.8.3 / 国际版 5.7.6），共用一个版本号会让其中一个冒充另一个。
    */
   async function userAgent () {
     const v = await resolveAppVersion()
@@ -718,7 +744,17 @@ function createVariantProvider (variant, { appBundle, authFile }) {
         'X-Requested-With': 'XMLHttpRequest',
         'X-Product': 'SaaS',
         ...catalogIdentityHeaders(cred),
-        'User-Agent': await userAgent(),
+        // 目录请求的 UA 与 chat 不同，这是 load-bearing 的：
+        //
+        // 上游网关按 UA 切分 roster。国内版用 App 形态 UA 时，返回的
+        // agents 里**没有 cli**，于是「可 chat 的模型集」无从取得；
+        // 必须用 CLI 形态（CLI/x.y.z CodeBuddy/x.y.z）才会出现 cli。
+        // 国际版反过来只认 App 形态。
+        //
+        // 早期版本对两个区域都发 App 形态 UA，靠「cli 缺失 → 不过滤」
+        // 侥幸列出了模型。那是个定时炸弹：上游一旦补上 cli，过滤结果
+        // 会变成 0 个模型。
+        'User-Agent': variant.region === 'cn' ? CN_CATALOG_UA : await userAgent(),
       },
       signal: AbortSignal.timeout(20_000),
     })
@@ -730,9 +766,19 @@ function createVariantProvider (variant, { appBundle, authFile }) {
       : null
     const allowed = Array.isArray(cliAgent?.models) ? new Set(cliAgent.models) : null
 
+    // cli roster 缺失时**不能**退化成「不过滤」。
+    //
+    // 目录文档里混着 CodeCompletion、CommitMessage 这类根本不能 chat 的
+    // 内部模型，不过滤会把它们暴露给用户，调用必然失败。这里退回到
+    // 「只保留看起来像 chat 模型的条目」，并在日志里说明，而不是静默
+    // 把整份文档端出去。
+    if (allowed === null) {
+      console.warn(`[porthub] provider "${variant.id}" 目录里没有 cli roster，退回启发式过滤`)
+    }
+
     const models = rows
       .filter((row) => row && typeof row.id === 'string')
-      .filter((row) => !allowed || allowed.has(row.id))
+      .filter((row) => (allowed !== null ? allowed.has(row.id) : looksChatCapable(row)))
       .filter((row) => row.disabled !== true)
       .filter((row) => {
         const win = row.contextWindow ?? row.maxInputTokens
