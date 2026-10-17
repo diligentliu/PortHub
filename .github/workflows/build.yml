@@ -19,6 +19,15 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 选择 Xcode
+        # macos-14 默认是 Xcode 15.4（Swift 5.10），而它的 SDK 由 Swift 6
+        # 构建，版本不匹配会直接报 "SDK is not supported by the compiler"。
+        # 换到 Xcode 16.2（Swift 6）后两者对齐。
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+          xcodebuild -version
+          swift --version
+
       - name: 环境信息
         run: |
           echo "macOS: $(sw_vers -productVersion)"
