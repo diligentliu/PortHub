@@ -1,5 +1,10 @@
 name: Build
 
+# 默认的 GITHUB_TOKEN 是只读的，创建 Release 需要显式声明写权限。
+# 没有这段，打 tag 时构建成功但发布那步会 403。
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main]
