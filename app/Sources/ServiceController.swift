@@ -122,14 +122,50 @@ final class ServiceController {
     /// 日志写到数据目录（bundle 内不可写）。
     var logFile: URL { dataDir.appendingPathComponent("porthub.log") }
 
-    /// 网关监听端口，从配置里读；读不到就用默认值。
+    /// 网关监听端口。
+    ///
+    /// 三处来源按优先级：运行时覆盖值（用户在界面里改的）→ 配置文件 → 默认值。
+    /// 每次读取都重新解析配置，这样用户改完配置文件、重启服务就能生效，
+    /// 不需要重启整个 App。
     var port: Int {
+        if let portOverride { return portOverride }
         guard
             let data = try? Data(contentsOf: configFile),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let port = json["port"] as? Int
-        else { return 15801 }
+            let port = json["port"] as? Int,
+            (1024...65535).contains(port)
+        else { return Self.defaultPort }
         return port
+    }
+
+    /// 用户在界面里临时指定的端口（不写回配置文件时使用）。
+    private var portOverride: Int?
+
+    /// 配置缺失时的兜底端口。
+    static let defaultPort = 15801
+
+    /// 修改端口并写回配置文件，随后需要重启服务才生效。
+    ///
+    /// 写回的是**用户配置**（数据目录那份），不是 bundle 里的默认配置——
+    /// 后者只读。
+    func setPort(_ newPort: Int) throws {
+        guard (1024...65535).contains(newPort) else {
+            throw NSError(domain: "PortHub", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "端口需在 1024–65535 之间"])
+        }
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: configFile),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = parsed
+        }
+        json["port"] = newPort
+        // 确保写的是用户配置那份
+        let user = dataDir.appendingPathComponent("porthub.config.json")
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        let out = try JSONSerialization.data(withJSONObject: json,
+                                             options: [.prettyPrinted, .sortedKeys])
+        try out.write(to: user)
+        portOverride = newPort
     }
 
     var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
@@ -330,16 +366,52 @@ final class ServiceController {
         while kill(pid, 0) == 0 && Date() < deadline { usleep(100_000) }
         if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
 
+        // 兜底清理：无论上面走了哪条路径，都再按端口确认一次。
+        //
+        // 这一步是「关应用时端口必须释放」的保证。之前的实现只在记了
+        // externalPid 时才按端口杀，一旦那个值没记上（App 刚启动、
+        // 孤儿进程由命令行起、或状态被重置），退出后端口会一直被占着，
+        // 下次打开应用就没有管理权。
+        forceReleasePort()
+
         // 复核：端口真的空了吗？没空就如实报告，不要让界面假装已停止。
         // 权限不足或进程僵死都可能让 SIGKILL 也无效，这时用户需要知道真相。
-        usleep(200_000)
         if listeningPid() != nil {
             state = .failed("停止失败：端口 \(port) 仍被占用")
         }
     }
 
+    /// 启动/停止切换。
+    ///
+    /// 判断依据是**端口上有没有活着的服务**，而不是本 App 有没有进程句柄。
+    /// 早期用 `process == nil` 判断，遇到孤儿进程（比如从命令行启动的）时
+    /// 会走向 start()，而 start() 又去「认领」它 —— 结果永远停不掉，
+    /// 表现为「打开应用后就没有管理权限了」。
+    /// 强制释放端口：找到监听者并结束它，不依赖任何本进程记下的状态。
+    ///
+    /// 设计意图是「端口归属只有一个管理者」——本 App。因此退出或停止时
+    /// 任何占着这个端口的进程都该被清掉，包括：
+    ///   - 自己 spawn 的（有句柄）
+    ///   - 认领的孤儿进程（有 PID）
+    ///   - 完全不知情的第三方实例（只能按端口找）
+    ///
+    /// 只杀「监听该端口」的进程，不会误伤其它 node 进程。
+    private func forceReleasePort() {
+        var attempts = 0
+        while attempts < 2, let pid = listeningPid() {
+            kill(pid, SIGTERM)
+            var waited = 0
+            while kill(pid, 0) == 0 && waited < 30 {   // 最多等 3 秒
+                usleep(100_000); waited += 1
+            }
+            if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            usleep(200_000)
+            attempts += 1
+        }
+    }
+
     func toggle() {
-        if process == nil { start() } else { stop() }
+        if isRunning { stop() } else { start() }
     }
 
     /// 服务是否在跑。
@@ -349,7 +421,10 @@ final class ServiceController {
     var isRunning: Bool {
         if let process, process.isRunning { return true }
         if let pid = externalPid, kill(pid, 0) == 0 { return true }
-        return false
+        // 兜底：端口上真有人在监听就算运行中。
+        // 这样即便 externalPid 没记上（App 刚启动、还没轮询到），
+        // toggle() 也不会把「打开」理解成「关闭」。
+        return listeningPid() != nil
     }
 
     // MARK: - 状态查询

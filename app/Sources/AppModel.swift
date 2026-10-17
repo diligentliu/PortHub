@@ -21,6 +21,42 @@ final class AppModel: ObservableObject {
     /// 模型页搜索关键字。
     @Published var searchText: String = ""
 
+    /// 端口编辑框的临时值。
+    @Published var portDraft: String = ""
+
+    /// 端口修改的错误提示。
+    @Published var portError: String?
+
+    /// 当前端口（供界面显示）。
+    var currentPort: Int { controller.port }
+
+    /// 步进调整端口草稿值（上下箭头用）。
+    func stepPort(by delta: Int) {
+        let base = Int(portDraft) ?? currentPort
+        let next = min(65535, max(1024, base + delta))
+        portDraft = String(next)
+        portError = nil
+    }
+
+    /// 应用端口：写配置并重启服务使其生效。
+    func applyPort(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let newPort = Int(trimmed), (1024...65535).contains(newPort) else {
+            portError = "端口需为 1024–65535 之间的数字"
+            return
+        }
+        do {
+            // 端口变了：先停旧服务（它在旧端口上），再写配置、按新端口启动。
+            controller.stop()
+            try controller.setPort(newPort)
+            portError = nil
+            refresh()
+            controller.start()
+        } catch {
+            portError = error.localizedDescription
+        }
+    }
+
     @Published var launchAtLogin: Bool {
         didSet { UserDefaults.standard.set(launchAtLogin, forKey: "LaunchAtLogin") }
     }
