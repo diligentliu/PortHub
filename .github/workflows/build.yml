@@ -51,7 +51,8 @@ jobs:
         run: |
           set -e
           APP="app/build/PortHub.app"
-          DMG="app/build/PortHub-1.0.0.dmg"
+          # 用通配符匹配，避免每次改版本号都要改 workflow
+          DMG="$(ls app/build/PortHub-*.dmg | head -1)"
 
           echo "== 检查 App bundle =="
           test -x "$APP/Contents/MacOS/PortHub" || { echo "缺少主程序"; exit 1; }
@@ -68,7 +69,7 @@ jobs:
           "$APP/Contents/Resources/node" -e 'console.log("node ok", process.version)' || exit 1
 
           echo "== 检查 DMG =="
-          test -f "$DMG" || { echo "DMG 未生成"; exit 1; }
+          test -f "$DMG" || { echo "DMG 未生成"; ls -la app/build/; exit 1; }
           hdiutil verify "$DMG" | tail -1
 
           echo "== 产物大小 =="
