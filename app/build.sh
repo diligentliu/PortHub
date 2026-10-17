@@ -177,7 +177,16 @@ make_dmg() {
   rm -rf "$STAGE" "$DMG"
   mkdir -p "$STAGE"
 
-  cp -R "$APP" "$STAGE/"
+  # 用 APFS clonefile 而不是 cp -R。
+  #
+  # App 有 117MB（内置 node），普通复制要再占一份真实空间，GitHub Actions
+  # 的 runner 磁盘很小，实测会在 hdiutil 阶段报 "No space left on device"。
+  # clonefile 在同一文件系统内是写时复制，几乎不占额外空间、也快得多。
+  # 文件系统不支持时回退到普通复制。
+  if ! cp -cR "$APP" "$STAGE/" 2>/dev/null; then
+    echo "   （clonefile 不可用，回退到普通复制）"
+    cp -R "$APP" "$STAGE/"
+  fi
   ln -s /Applications "$STAGE/Applications"   # 拖拽安装的快捷方式
 
   echo "→ 生成 DMG…"
