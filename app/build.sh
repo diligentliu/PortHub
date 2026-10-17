@@ -20,7 +20,7 @@ PROJECT="$(cd "$HERE/.." && pwd)"          # 项目根目录
 BUILD="$HERE/build"
 APP="$BUILD/PortHub.app"
 BIN_NAME="PortHub"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 SOURCES=("$HERE/Sources/main.swift" "$HERE/Sources/AppDelegate.swift" \
          "$HERE/Sources/ServiceController.swift" "$HERE/Sources/AppModel.swift" \
