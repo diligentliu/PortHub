@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 构建 macOS App
+    # macos-14 起是 Apple Silicon（arm64），与 build.sh 的目标架构一致。
+    # macos-13 是 Intel，编 arm64 目标需要额外的交叉编译配置，这里不用。
+    runs-on: macos-14
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          echo "macOS: $(sw_vers -productVersion)"
+          echo "架构: $(uname -m)"
+          xcodebuild -version 2>/dev/null || echo "（无完整 Xcode，用 CLT 的 swiftc）"
+          swift --version 2>&1 | head -2
+
+      - name: 安装 Node.js
+        # 本地构建时 node 从开发者的 nvm/brew 来；CI 里显式装一个已知版本，
+        # 保证产出的 App 内置的运行时版本可复现。
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 构建 App 与 DMG
+        run: |
+          chmod +x app/build.sh
+          app/build.sh dmg
+
+      - name: 验证产物
+        run: |
+          set -e
+          APP="app/build/PortHub.app"
+          DMG="app/build/PortHub-1.0.0.dmg"
+
+          echo "== 检查 App bundle =="
+          test -x "$APP/Contents/MacOS/PortHub" || { echo "缺少主程序"; exit 1; }
+          test -x "$APP/Contents/Resources/node" || { echo "缺少内置 node"; exit 1; }
+          test -f "$APP/Contents/Resources/gateway/gateway.mjs" || { echo "缺少网关代码"; exit 1; }
+          test -f "$APP/Contents/Resources/gateway/providers/workbuddy.mjs" || { echo "缺少 provider"; exit 1; }
+
+          echo "== 检查签名 =="
+          codesign --verify "$APP" || { echo "App 签名无效"; exit 1; }
+          codesign --verify "$APP/Contents/Resources/node" || { echo "node 签名无效"; exit 1; }
+
+          echo "== 检查内置 node 可执行 =="
+          # 在 CI 上直接跑一次，确认不是被签名机制挡掉的死文件
+          "$APP/Contents/Resources/node" -e 'console.log("node ok", process.version)' || exit 1
+
+          echo "== 检查 DMG =="
+          test -f "$DMG" || { echo "DMG 未生成"; exit 1; }
+          hdiutil verify "$DMG" | tail -1
+
+          echo "== 产物大小 =="
+          du -sh "$APP" "$DMG"
+
+      - name: 上传 DMG（每次构建）
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortHub-dmg
+          path: app/build/PortHub-*.dmg
+          retention-days: 30
+
+      - name: 上传 App bundle（便于排查）
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortHub-app
+          path: app/build/PortHub.app
+          retention-days: 7
+
+      - name: 发布到 Release
+        # 打 v* 标签时把 DMG 附到对应 Release 上；普通提交只留 artifact。
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/PortHub-*.dmg
+          generate_release_notes: true

@@ -28,23 +28,31 @@ SOURCES=("$HERE/Sources/main.swift" "$HERE/Sources/AppDelegate.swift" \
 
 # ── 选 SDK ────────────────────────────────────────────────────────────────
 # 按可用性顺序取第一个存在的，避免逐个试编译（很慢）。
-pick_sdk() {
+# 候选 SDK 列表，按优先级排列。
+#
+# 为什么要多个：SDK 与 swiftc 版本不匹配时会报 `~Copyable` 之类的内部错误，
+# 而哪种组合能编过取决于机器。GitHub Actions 的 runner 是完整 Xcode（xcrun
+# 给的就是对的），本机只有 Command Line Tools 且最新的 26.x 编不过，
+# 需要退到 15.x。所以这里列出候选，编译失败自动换下一个。
+sdk_candidates() {
+  local from_xcrun
+  from_xcrun="$(xcrun --show-sdk-path 2>/dev/null || true)"
+  [[ -n "$from_xcrun" && -d "$from_xcrun" ]] && echo "$from_xcrun"
+
   local sdk_root="/Library/Developer/CommandLineTools/SDKs"
   for v in 15.5 15.4 15.2 15 14.5 14; do
-    local sdk="$sdk_root/MacOSX${v}.sdk"
-    [[ -d "$sdk" ]] && { echo "$sdk"; return 0; }
+    [[ -d "$sdk_root/MacOSX${v}.sdk" ]] && echo "$sdk_root/MacOSX${v}.sdk"
   done
-  ls -d "$sdk_root"/MacOSX*.sdk 2>/dev/null | head -1
+  ls -d "$sdk_root"/MacOSX*.sdk 2>/dev/null
 }
 
-SDK="$(pick_sdk)"
-if [[ -z "$SDK" || ! -d "$SDK" ]]; then
-  echo "✗ 找不到可用的 macOS SDK" >&2
-  exit 1
-fi
-echo "→ SDK: $SDK"
-
 # ── 找 node（要打包进 App）───────────────────────────────────────────────
+#
+# 必须打包：用户机器上未必装了 Node.js，而且即便装了也可能在 nvm 里、
+# 从 Finder 启动的 App 找不到。内置一份最省事。
+#
+# CI 上由 actions/setup-node 提供，`command -v node` 就能拿到；
+# 本机走 nvm / homebrew。
 find_node() {
   for c in "$(command -v node 2>/dev/null)" \
            /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
@@ -62,18 +70,29 @@ find_node() {
 NODE_BIN="$(find_node)" || { echo "✗ 找不到 node，无法构建自包含 App" >&2; exit 1; }
 echo "→ Node: $NODE_BIN ($(du -h "$NODE_BIN" | cut -f1))"
 
-# ── 编译主程序 ────────────────────────────────────────────────────────────
+# ── 编译主程序（逐个尝试候选 SDK）──────────────────────────────────────────
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/gateway/providers"
 
 echo "→ 编译主程序…"
-swiftc \
-  -sdk "$SDK" \
-  -O \
-  -target arm64-apple-macos13.0 \
-  -framework AppKit \
-  -o "$APP/Contents/MacOS/$BIN_NAME" \
-  "${SOURCES[@]}"
+BUILT=0
+while read -r sdk; do
+  [[ -z "$sdk" || ! -d "$sdk" ]] && continue
+  echo "   试 SDK: $(basename "$sdk")"
+  if swiftc -sdk "$sdk" -O -target arm64-apple-macos13.0 -framework AppKit \
+       -o "$APP/Contents/MacOS/$BIN_NAME" "${SOURCES[@]}" 2>/tmp/porthub-swiftc.log; then
+    BUILT=1
+    echo "   ✓ 使用 $sdk"
+    break
+  fi
+  echo "   ✗ 编不过，换下一个"
+done < <(sdk_candidates | awk '!seen[$0]++')
+
+if [[ "$BUILT" -ne 1 ]]; then
+  echo "✗ 所有候选 SDK 都编译失败。最后一次错误：" >&2
+  tail -20 /tmp/porthub-swiftc.log >&2
+  exit 1
+fi
 
 # ── 打包资源 ──────────────────────────────────────────────────────────────
 echo "→ 打包资源…"
