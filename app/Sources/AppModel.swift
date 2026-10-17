@@ -21,44 +21,29 @@ final class AppModel: ObservableObject {
     /// 模型页搜索关键字。
     @Published var searchText: String = ""
 
+    /// 监听地址编辑框的临时值。
+    @Published var hostDraft: String = ""
+
     /// 端口编辑框的临时值。
     @Published var portDraft: String = ""
 
     /// 端口修改的错误提示。
     @Published var portError: String?
 
+    /// 登录时启动（写入 UserDefaults，由 AppDelegate 读取）。
+    @Published var launchAtLogin: Bool {
+        didSet { UserDefaults.standard.set(launchAtLogin, forKey: "LaunchAtLogin") }
+    }
+
+    /// 当前监听地址（供界面显示）。
+    var currentHost: String { controller.host }
+
     /// 当前端口（供界面显示）。
     var currentPort: Int { controller.port }
 
-    /// 步进调整端口草稿值（上下箭头用）。
-    func stepPort(by delta: Int) {
-        let base = Int(portDraft) ?? currentPort
-        let next = min(65535, max(1024, base + delta))
-        portDraft = String(next)
-        portError = nil
-    }
-
-    /// 应用端口：写配置并重启服务使其生效。
-    func applyPort(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard let newPort = Int(trimmed), (1024...65535).contains(newPort) else {
-            portError = "端口需为 1024–65535 之间的数字"
-            return
-        }
-        do {
-            // 端口变了：先停旧服务（它在旧端口上），再写配置、按新端口启动。
-            controller.stop()
-            try controller.setPort(newPort)
-            portError = nil
-            refresh()
-            controller.start()
-        } catch {
-            portError = error.localizedDescription
-        }
-    }
-
-    @Published var launchAtLogin: Bool {
-        didSet { UserDefaults.standard.set(launchAtLogin, forKey: "LaunchAtLogin") }
+    /// 输入是否与当前生效值不同。
+    var listenChanged: Bool {
+        hostDraft != currentHost || portDraft != String(currentPort)
     }
 
     let controller: ServiceController
@@ -76,30 +61,75 @@ final class AppModel: ObservableObject {
             }
         }
         self.state = controller.state
+        self.hostDraft = controller.host
+        self.portDraft = String(controller.port)
 
-        // 每 5 秒刷新；窗口关着时也继续（状态栏要显示状态）。
+        // 每 5 秒刷新一次；窗口关着时也继续（菜单栏要反映状态）
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+    }
+
+    /// 加载当前生效的监听配置到编辑框。
+    func loadListenDraft() {
+        hostDraft = currentHost
+        portDraft = String(currentPort)
+    }
+
+    /// 应用监听地址与端口：写配置并重启服务。
+    ///
+    /// 地址与端口一起改，因为它们共同构成 cc-switch 里的 Base URL；
+    /// 分两次改会让某个中间状态不可用。
+    func applyListen() {
+        let host = hostDraft.trimmingCharacters(in: .whitespaces)
+        let portText = portDraft.trimmingCharacters(in: .whitespaces)
+
+        guard !host.isEmpty, host.rangeOfCharacter(from: .whitespaces) == nil else {
+            portError = "监听地址不能为空，也不能包含空格"
+            return
+        }
+        guard let newPort = Int(portText), (1024...65535).contains(newPort) else {
+            portError = "端口需为 1024–65535 之间的数字"
+            return
+        }
+
+        do {
+            // 先停旧服务（它还在旧地址上），再写配置、按新参数启动
+            controller.stop()
+            try controller.setListen(host: host, port: newPort)
+            portError = nil
+            refresh()
+            controller.start()
+        } catch {
+            portError = error.localizedDescription
+        }
+    }
+
+    func toggleService() {
+        controller.toggle()
+        Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            refresh()
         }
     }
 
     // MARK: - 派生状态
 
     var isRunning: Bool { controller.isRunning }
-
-    /// 日志末尾内容，供日志页展示。
-    var logText: String { controller.tailLog(lines: 200) }
     var baseURL: String { controller.baseURL.absoluteString }
     var anyProviderDown: Bool { providers.contains { !$0.ok } }
 
+    /// 日志末尾内容，供日志页展示。
+    var logText: String { controller.tailLog(lines: 200) }
+
     /// 按搜索关键字过滤后的模型。
     var filteredModels: [(id: String, owner: String)] {
-        guard !searchText.trimmingCharacters(in: .whitespaces).isEmpty else { return models }
-        let q = searchText.lowercased()
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return models }
         return models.filter { $0.id.lowercased().contains(q) || $0.owner.lowercased().contains(q) }
     }
 
-    /// 过滤后的分组，供模型页展示。
+    /// 过滤后按上游分组的模型，供模型页展示。
     var filteredGroups: [ModelGroup] {
         var byOwner: [String: [String]] = [:]
         for m in filteredModels {
@@ -111,28 +141,8 @@ final class AppModel: ObservableObject {
         return byOwner.keys.sorted().map { ModelGroup(provider: $0, ids: byOwner[$0]!.sorted()) }
     }
 
-    /// 模型按上游分组，供列表展示。
-    var groupedModels: [ModelGroup] {
-        var byOwner: [String: [String]] = [:]
-        for m in models {
-            // 展示时去掉 provider 前缀，界面更干净
-            let short = m.id.contains("/")
-                ? String(m.id.split(separator: "/", maxSplits: 1).last ?? "")
-                : m.id
-            byOwner[m.owner, default: []].append(short)
-        }
-        return byOwner.keys.sorted().map { ModelGroup(provider: $0, ids: byOwner[$0]!.sorted()) }
-    }
-
-    // MARK: - 动作
-
-    func toggleService() {
-        controller.toggle()
-        Task {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            refresh()
-        }
-    }
+    /// 模型按上游分组（不过滤）。
+    var groupedModels: [ModelGroup] { filteredGroups }
 
     func refresh() {
         state = controller.state

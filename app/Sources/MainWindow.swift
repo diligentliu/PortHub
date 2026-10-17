@@ -205,92 +205,92 @@ struct MainView: View {
                 }
             }
 
-            // 端口设置
-            SectionHeader(title: "端口")
+            // 监听设置：左侧标签 + 右侧两个带标签的输入框 + 右侧按钮
             Card {
-                VStack(alignment: .leading, spacing: DS.Space.md) {
-                    HStack(alignment: .top, spacing: DS.Space.md) {
-                        IconTile(symbol: "network", tint: .accentColor, size: 36)
+                HStack(alignment: .top, spacing: DS.Space.lg) {
+                    // 左侧：行标题
+                    Text("监听地址与端口")
+                        .font(DS.Font.cardTitle)
+                        .frame(width: 130, alignment: .leading)
+                        .padding(.top, 18)
 
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("监听端口").font(DS.Font.cardTitle)
-                            Text("客户端通过此端口访问网关")
-                                .font(DS.Font.cardSubtitle)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-
-                        // 端口输入 + 步进，做成带边框的标准控件
-                        HStack(spacing: 0) {
-                            TextField("", text: $model.portDraft)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 12, design: .monospaced))
-                                .multilineTextAlignment(.center)
-                                .frame(width: 62)
-                                .onAppear { model.portDraft = String(model.currentPort) }
-                                .onSubmit { model.applyPort(model.portDraft) }
-
-                            Divider().frame(height: 18)
-
-                            VStack(spacing: 0) {
-                                Button {
-                                    model.stepPort(by: 1)
-                                } label: {
-                                    Image(systemName: "chevron.up")
-                                        .font(.system(size: 8, weight: .semibold))
-                                        .frame(width: 18, height: 10)
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    model.stepPort(by: -1)
-                                } label: {
-                                    Image(systemName: "chevron.down")
-                                        .font(.system(size: 8, weight: .semibold))
-                                        .frame(width: 18, height: 10)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.primary.opacity(0.06))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(DS.Palette.cardStroke, lineWidth: 1)
-                        )
-
-                        Button("应用") {
-                            model.applyPort(model.portDraft)
-                        }
-                        .controlSize(.regular)
-                        .disabled(model.portDraft == String(model.currentPort))
-                    }
-
-                    if let err = model.portError {
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.circle.fill")
-                                .font(.system(size: 10))
-                            Text(err).font(DS.Font.badge)
-                        }
-                        .foregroundStyle(DS.Palette.bad)
-                    } else if model.portDraft != String(model.currentPort) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 10))
-                            Text("应用后会重启服务，cc-switch 的 Base URL 需同步改成 \(model.portDraft)")
-                                .font(DS.Font.badge)
-                        }
-                        .foregroundStyle(DS.Palette.warn)
-                    } else {
-                        Text("改端口会让服务重启约 2 秒；记得同步更新 cc-switch 的 Base URL。")
-                            .font(DS.Font.badge)
+                    // 地址输入
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("监听地址")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        TextField("127.0.0.1", text: $model.hostDraft)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .frame(width: 190)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color(nsColor: .textBackgroundColor))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(DS.Palette.cardStroke, lineWidth: 1)
+                            )
+                        Text("推荐 127.0.0.1")
+                            .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                     }
+
+                    // 端口输入
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("监听端口")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        TextField("15801", text: $model.portDraft)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .frame(width: 120)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color(nsColor: .textBackgroundColor))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(DS.Palette.cardStroke, lineWidth: 1)
+                            )
+                            .onSubmit { model.applyListen() }
+                        Text("1024–65535")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    Spacer(minLength: DS.Space.md)
+
+                    // 右侧：保存并重启
+                    Button("保存并重启服务") {
+                        model.applyListen()
+                    }
+                    .controlSize(.large)
+                    .padding(.top, 20)
+                    .disabled(!model.listenChanged)
+                }
+                .padding(.vertical, 2)
+
+                // 状态提示
+                if let err = model.portError {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.circle.fill").font(.system(size: 10))
+                        Text(err).font(DS.Font.badge)
+                    }
+                    .foregroundStyle(DS.Palette.bad)
+                    .padding(.top, DS.Space.sm)
+                } else if model.listenChanged {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 10))
+                        Text("保存后会重启服务约 2 秒，cc-switch 的 Base URL 需同步更新")
+                            .font(DS.Font.badge)
+                    }
+                    .foregroundStyle(DS.Palette.warn)
+                    .padding(.top, DS.Space.sm)
                 }
             }
 

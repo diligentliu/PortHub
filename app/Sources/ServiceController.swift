@@ -138,37 +138,64 @@ final class ServiceController {
         return port
     }
 
+    /// 监听地址。与 port 同样的优先级：运行时覆盖 → 配置文件 → 默认值。
+    var host: String {
+        if let hostOverride { return hostOverride }
+        guard
+            let data = try? Data(contentsOf: configFile),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let host = json["host"] as? String,
+            !host.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return "127.0.0.1" }
+        return host
+    }
+
+    private var hostOverride: String?
+
     /// 用户在界面里临时指定的端口（不写回配置文件时使用）。
     private var portOverride: Int?
 
     /// 配置缺失时的兜底端口。
     static let defaultPort = 15801
 
-    /// 修改端口并写回配置文件，随后需要重启服务才生效。
+    /// 修改监听地址与端口并写回用户配置，随后需要重启服务才生效。
     ///
     /// 写回的是**用户配置**（数据目录那份），不是 bundle 里的默认配置——
     /// 后者只读。
-    func setPort(_ newPort: Int) throws {
+    func setListen(host newHost: String, port newPort: Int) throws {
         guard (1024...65535).contains(newPort) else {
             throw NSError(domain: "PortHub", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "端口需在 1024–65535 之间"])
         }
+        let trimmedHost = newHost.trimmingCharacters(in: .whitespaces)
+        guard !trimmedHost.isEmpty else {
+            throw NSError(domain: "PortHub", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "监听地址不能为空"])
+        }
+
         var json: [String: Any] = [:]
         if let data = try? Data(contentsOf: configFile),
            let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             json = parsed
         }
+        json["host"] = trimmedHost
         json["port"] = newPort
-        // 确保写的是用户配置那份
+
         let user = dataDir.appendingPathComponent("porthub.config.json")
         try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         let out = try JSONSerialization.data(withJSONObject: json,
                                              options: [.prettyPrinted, .sortedKeys])
         try out.write(to: user)
+
+        hostOverride = trimmedHost
         portOverride = newPort
     }
 
-    var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
+    /// 客户端访问地址。监听 0.0.0.0 时仍以 127.0.0.1 对外。
+    var baseURL: URL {
+        let reachable = host == "0.0.0.0" ? "127.0.0.1" : host
+        return URL(string: "http://\(reachable):\(port)")!
+    }
 
     // MARK: - 进程管理
 
