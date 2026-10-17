@@ -382,16 +382,12 @@ final class ServiceController {
         try? logHandle?.close()
         logHandle = nil
 
-        // 路径 2 + 3：外部实例。优先用记下的 PID，没有就现查端口。
-        // 两者都指向同一个目标：谁在监听这个端口，就停谁。
-        let target = externalPid ?? listeningPid()
+        // 路径 2 + 3：外部实例（认领过或完全不认识的）。
+        //
+        // 统一交给 forceReleasePort() 处理 —— 它会先校验「这个进程是不是
+        // 我们的网关」再决定杀不杀。早期这里直接 `kill(listeningPid())`，
+        // 等于见谁杀谁：别的服务占了同端口也会被干掉。
         externalPid = nil
-        guard let pid = target else { return }   // 真的没人监听，那就不必做什么
-
-        kill(pid, SIGTERM)
-        let deadline = Date().addingTimeInterval(3)
-        while kill(pid, 0) == 0 && Date() < deadline { usleep(100_000) }
-        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
 
         // 兜底清理：无论上面走了哪条路径，都再按端口确认一次。
         //
@@ -414,26 +410,84 @@ final class ServiceController {
     /// 早期用 `process == nil` 判断，遇到孤儿进程（比如从命令行启动的）时
     /// 会走向 start()，而 start() 又去「认领」它 —— 结果永远停不掉，
     /// 表现为「打开应用后就没有管理权限了」。
-    /// 强制释放端口：找到监听者并结束它，不依赖任何本进程记下的状态。
+    /// 判断某个 PID 是不是「我们的」网关进程。
     ///
-    /// 设计意图是「端口归属只有一个管理者」——本 App。因此退出或停止时
-    /// 任何占着这个端口的进程都该被清掉，包括：
-    ///   - 自己 spawn 的（有句柄）
-    ///   - 认领的孤儿进程（有 PID）
-    ///   - 完全不知情的第三方实例（只能按端口找）
+    /// 退出应用时要停掉网关，但不能见谁杀谁 —— 同端口的进程可能完全是
+    /// 别的东西。判据只有一个：**命令行里的脚本路径就是我们部署的那一份**。
     ///
-    /// 只杀「监听该端口」的进程，不会误伤其它 node 进程。
+    /// 为什么不用「可执行文件是 node」：任何 node 进程都满足，太松。
+    /// 实测一个 `/tmp/decoy/gateway.mjs` 的伪装进程会因此被误判成我们的。
+    /// 必须比对完整脚本路径才准确。
+    ///
+    /// 关于「成为父进程」：macOS 没有 reparent 这类系统调用，进程无法把
+    /// PID 1 名下的孤儿认作自己的子进程。所以「收养」只能是逻辑上的接管
+    /// （记住 PID + 每次按证据重新校验），内核层面做不到。
+    private func isOurGateway(_ pid: pid_t) -> Bool {
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-o", "command=", "-p", String(pid)]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        ps.standardError = FileHandle.nullDevice
+        guard (try? ps.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        ps.waitUntilExit()
+        let command = String(data: data, encoding: .utf8) ?? ""
+
+        // 网关的两种部署位置：App bundle 内，或开发时的工作副本
+        let expected = [
+            gatewayScript.path,                                   // bundle/.../gateway/gateway.mjs 或 src/gateway.mjs
+            root.appendingPathComponent("gateway.mjs").path,
+            URL(fileURLWithPath: NSHomeDirectory())
+                .appendingPathComponent("PortHub/src/gateway.mjs").path,
+        ]
+
+        return expected.contains { command.contains($0) }
+    }
+
+    /// 结束一个已确认属于我们的网关进程。
+    private func terminateGateway(_ pid: pid_t) {
+        kill(pid, SIGTERM)
+        var waited = 0
+        while kill(pid, 0) == 0 && waited < 30 {   // 最多等 3 秒
+            usleep(100_000); waited += 1
+        }
+        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+    }
+
+    /// 释放端口：只结束**确认属于 PortHub 的**网关进程。
+    ///
+    /// 校验放在 kill 之前，端口被其它服务占用时不会误杀 —— 那种情况
+    /// 只在日志里记一条，让用户自己发现端口冲突。
     private func forceReleasePort() {
-        var attempts = 0
-        while attempts < 2, let pid = listeningPid() {
-            kill(pid, SIGTERM)
-            var waited = 0
-            while kill(pid, 0) == 0 && waited < 30 {   // 最多等 3 秒
-                usleep(100_000); waited += 1
-            }
-            if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+        guard let pid = listeningPid() else { return }
+
+        guard isOurGateway(pid) else {
+            // 不是我们的进程：不杀，只记日志。
+            // 这时端口仍被占，stop() 会据此把状态标成「停止失败」。
+            appendLog("端口 \(port) 被 PID \(pid) 占用，但它不是 PortHub 网关，已跳过不杀")
+            return
+        }
+
+        terminateGateway(pid)
+
+        // 复核：进程可能还没完全退出、或又起了新的
+        usleep(200_000)
+        if let again = listeningPid(), isOurGateway(again) {
+            appendLog("端口 \(port) 仍被自己的网关占用（PID \(again)），再尝试一次")
+            terminateGateway(again)
             usleep(200_000)
-            attempts += 1
+        }
+    }
+
+    /// 往网关日志里追加一行（用于记录跳过的误杀与重试）。
+    private func appendLog(_ message: String) {
+        let line = "\(ISO8601DateFormatter().string(from: Date())) [app] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: logFile) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
         }
     }
 
